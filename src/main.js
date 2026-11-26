@@ -8,10 +8,15 @@ const STORAGE_KEY = "onda.state.v1";
 const $ = (id) => document.getElementById(id);
 const els = {
   list: $("list"), empty: $("empty"), add: $("add"), clear: $("clear"),
-  play: $("play"), prev: $("prev"), next: $("next"), mode: $("mode"), autoplay: $("autoplay"),
+  play: $("play"), prev: $("prev"), next: $("next"), mode: $("mode"), flow: $("flow"),
   seek: $("seek"), cur: $("t-cur"), dur: $("t-dur"), vol: $("vol"), mute: $("mute"),
   nowTitle: $("now-title"), nowSub: $("now-sub"), nowMeta: $("now-meta"),
   drop: $("drop"), toast: $("toast"), spectrum: $("spectrum"),
+  nowCover: $("now-cover"), trimL: $("trim-l"), trimR: $("trim-r"),
+  settings: $("settings"), settingsMenu: $("settings-menu"), fadeOpts: $("fade-opts"),
+  trimDialog: $("trim-dialog"), trimTitle: $("trim-title"), trimCover: $("trim-cover"),
+  trimStart: $("trim-start"), trimEnd: $("trim-end"), trimStartNow: $("trim-start-now"), trimEndNow: $("trim-end-now"),
+  trimInfo: $("trim-info"), trimReset: $("trim-reset"), trimPreview: $("trim-preview"), trimDone: $("trim-done"),
 };
 
 const audio = new Audio();
@@ -26,6 +31,8 @@ let volume = 0.8;
 let muted = false;
 let seeking = false;
 let uid = 0;
+let fadeSec = 1;        // fundido al pausar/reanudar y entre pistas
+let stopAfter = false;  // detener al terminar la pista actual
 
 // ---------- Utilidades ----------
 const fmt = (s) => {
@@ -63,8 +70,8 @@ function save() {
   if (!TAURI) return; // en el navegador las URLs de blob no sobreviven a recargar
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      tracks: tracks.map(({ path, mode, duration, bpm, key, av }) => ({ path, mode, duration, bpm, key, av })),
-      current, autoplay, volume, muted,
+      tracks: tracks.map(({ path, mode, duration, bpm, key, av, start, end, tags }) => ({ path, mode, duration, bpm, key, av, start, end, tags })),
+      current, autoplay, volume, muted, fadeSec,
     }));
   } catch {}
 }
@@ -77,14 +84,13 @@ function load() {
     autoplay = s.autoplay ?? true;
     volume = s.volume ?? 0.8;
     muted = s.muted ?? false;
+    fadeSec = s.fadeSec ?? 1;
     tracks = (s.tracks || []).map((t) => Object.assign(makeTrack(t.path, null, t.mode, t.duration), {
       bpm: t.bpm ?? null, key: t.key ?? null, av: t.av ?? 0, analyzed: t.av === ANALYSIS_VERSION,
+      start: t.start ?? null, end: t.end ?? null, tags: t.tags ?? null,
     }));
     current = Math.min(s.current ?? -1, tracks.length - 1);
-    if (current >= 0) {
-      audio.src = tracks[current].url;
-      audio.loop = tracks[current].mode === "loop";
-    }
+    if (current >= 0) loadSource(tracks[current]);
   } catch {}
 }
 
@@ -94,8 +100,77 @@ function makeTrack(path, url, mode = "once", duration = null) {
   return {
     id: ++uid, path, name, artist, mode, duration, error: false,
     bpm: null, key: null, analyzed: false,
+    start: null, end: null,                 // recorte en segundos (null = sin recorte)
+    tags: null, cover: null, tagsRead: false, // etiquetas ID3 y carátula
     url: url || (TAURI ? TAURI.core.convertFileSrc(path) : path),
   };
+}
+
+// Nombre y artista: primero las etiquetas del MP3, si no, el nombre del archivo
+const titleOf = (t) => t.tags?.title || t.name;
+function artistOf(t) {
+  const g = t.tags;
+  if (g?.artist) return g.artist;
+  if (g?.albumArtist) return g.albumArtist;
+  if (g?.composer) return g.composer;
+  // Si el título está en el nombre del archivo ("Título - Artista"), la otra parte es el artista
+  if (g?.title) {
+    const norm = (s) => s.replace(/^[A-Z]{2}_/, "").trim().toLowerCase();
+    const base = t.path.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, "");
+    const parts = base.split(" - ");
+    const rest = parts.filter((p) => norm(p) !== norm(g.title));
+    if (parts.length >= 2 && rest.length === parts.length - 1) return rest.join(" - ").trim();
+  }
+  return t.artist;
+}
+
+// BPM y tonalidad: si el archivo los trae en sus etiquetas, se usan esos
+function tagBpm(t) {
+  const v = parseFloat(t.tags?.bpm);
+  return v > 20 && v < 300 ? v : null;
+}
+function tagKey(t) {
+  const m = /^\s*([A-G])\s*([#♯b♭]?)\s*(m|min|minor|moll)?\s*$/i.exec(t.tags?.key || "");
+  if (!m) return null;
+  const base = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }[m[1].toUpperCase()];
+  const acc = m[2] === "#" || m[2] === "♯" ? 1 : m[2] === "b" || m[2] === "♭" ? -1 : 0;
+  return { tonic: (base + acc + 12) % 12, minor: !!m[3], fromTag: true };
+}
+const bpmOf = (t) => tagBpm(t) ?? t.bpm;
+const keyOf = (t) => tagKey(t) ?? t.key;
+const isTrimmed = (t) => t.start != null || t.end != null;
+const coverHtml = (t) => t.cover ? `<img src="${t.cover}" alt="" draggable="false" />` : icon("note");
+
+// Lee etiquetas y carátula de cada pista, de a una
+let readingTags = false;
+async function readTagsQueue() {
+  if (readingTags) return;
+  readingTags = true;
+  try {
+    const { readID3 } = await import("./id3.js");
+    for (const t of tracks) {
+      if (t.tagsRead) continue;
+      t.tagsRead = true;
+      try {
+        const res = await readID3(t.url);
+        if (res) {
+          const { cover, ...text } = res;
+          t.tags = text;
+          if (cover) t.cover = URL.createObjectURL(cover);
+        }
+      } catch (err) {
+        console.warn("No se pudieron leer las etiquetas", t.path, err);
+      }
+      if (tracks.includes(t)) {
+        updateRow(t);
+        if (t === tracks[current]) renderPlayer();
+      }
+    }
+  } finally {
+    readingTags = false;
+  }
+  save();
+  if (tracks.some((t) => !t.tagsRead)) readTagsQueue();
 }
 
 function addPaths(paths) {
@@ -119,6 +194,7 @@ function afterAdd(before, count) {
   render();
   save();
   probeDurations();
+  readTagsQueue();
   analyzeQueue();
   if (before === 0 && current === -1) select(0, false);
 }
@@ -127,9 +203,11 @@ function removeTrack(i) {
   const wasCurrent = i === current;
   const t = tracks[i];
   if (t.url.startsWith("blob:")) URL.revokeObjectURL(t.url);
+  if (t.cover) URL.revokeObjectURL(t.cover);
   tracks.splice(i, 1);
   if (wasCurrent) {
     const playing = !audio.paused;
+    cancelFade();
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
@@ -144,10 +222,14 @@ function removeTrack(i) {
 
 function clearAll() {
   if (!tracks.length) return;
+  cancelFade();
   audio.pause();
   audio.removeAttribute("src");
   audio.load();
-  tracks.forEach((t) => t.url.startsWith("blob:") && URL.revokeObjectURL(t.url));
+  tracks.forEach((t) => {
+    if (t.url.startsWith("blob:")) URL.revokeObjectURL(t.url);
+    if (t.cover) URL.revokeObjectURL(t.cover);
+  });
   tracks = [];
   current = -1;
   render();
@@ -250,15 +332,19 @@ async function analyzeQueue() {
 }
 
 function metaText(t) {
-  if (!t.analyzed) return analyzing === t ? "analizando…" : "";
+  const bpm = bpmOf(t), key = keyOf(t);
+  if (!t.analyzed && !(tagBpm(t) && tagKey(t))) {
+    if (analyzing === t) return "analizando…";
+    if (!bpm && !key) return "";
+  }
   const parts = [];
-  if (t.bpm) parts.push(`${Math.round(t.bpm)} BPM`);
-  if (t.key) parts.push(keyShort(t.key));
+  if (bpm) parts.push(`${Math.round(bpm)} BPM`);
+  if (key) parts.push(keyShort(key));
   return parts.join(" · ");
 }
 
 // ---------- Espectro ----------
-let audioCtx = null, analyser = null, gainNode = null, freqData = null;
+let audioCtx = null, analyser = null, gainNode = null, fadeGain = null, freqData = null;
 const BARS = 64;
 const barLevels = new Float32Array(BARS);
 const barPeaks = new Float32Array(BARS);
@@ -276,9 +362,11 @@ function ensureAudioGraph() {
     analyser.minDecibels = -90;
     analyser.maxDecibels = -20;
     gainNode = audioCtx.createGain();
-    // El espectro se toma antes del volumen, así no cambia al bajarlo
+    fadeGain = audioCtx.createGain();
+    // El espectro se toma antes del volumen y del fundido, así no cambia con ellos
     source.connect(analyser);
-    analyser.connect(gainNode);
+    analyser.connect(fadeGain);
+    fadeGain.connect(gainNode);
     gainNode.connect(audioCtx.destination);
     applyVolume();
     freqData = new Uint8Array(analyser.frequencyBinCount);
@@ -456,13 +544,72 @@ function roundTop(g, x, y, w, h, r) {
 window.addEventListener("resize", startSpectrum);
 
 // ---------- Reproducción ----------
-function select(i, play = true) {
-  if (i < 0 || i >= tracks.length) return;
-  current = i;
-  const t = tracks[i];
+const QUICK_FADE = 0.12;   // fundido mínimo para evitar "clics" al pausar o cambiar
+let pendingStart = null;   // posición a la que saltar cuando cargue la pista
+let pendingFadeIn = null;  // fundido de entrada a aplicar cuando empiece a sonar
+let pauseTimer = 0;
+let fadeOutActive = false; // bajando el volumen en los últimos segundos de la pista
+
+const isPlaying = () => !audio.paused && !pauseTimer;
+const resumeFade = () => (fadeSec ? Math.min(fadeSec, 1.5) : QUICK_FADE);
+
+function loadSource(t) {
   audio.src = t.url;
-  audio.loop = t.mode === "loop";
-  if (play) audio.play().catch(() => {});
+  // El bucle nativo no tiene cortes, pero solo sirve si la pista no está recortada
+  audio.loop = t.mode === "loop" && !isTrimmed(t);
+  pendingStart = t.start;
+}
+
+function rampTo(value, seconds) {
+  if (!fadeGain) return;
+  const g = fadeGain.gain, now = audioCtx.currentTime;
+  g.cancelScheduledValues(now);
+  g.setValueAtTime(g.value, now);
+  g.linearRampToValueAtTime(value, now + Math.max(0.01, seconds));
+}
+
+function cancelFade() {
+  clearTimeout(pauseTimer);
+  pauseTimer = 0;
+  fadeOutActive = false;
+}
+
+function playAudio(fadeIn = QUICK_FADE) {
+  ensureAudioGraph();
+  cancelFade();
+  if (fadeGain) {
+    fadeGain.gain.cancelScheduledValues(audioCtx.currentTime);
+    fadeGain.gain.setValueAtTime(0, audioCtx.currentTime);
+  }
+  pendingFadeIn = fadeIn;
+  if (!audio.paused) { rampTo(1, fadeIn); pendingFadeIn = null; }
+  audio.play().catch(() => {});
+  renderPlayer();
+}
+
+function pauseAudio() {
+  if (audio.paused || pauseTimer) return;
+  if (!fadeGain) { audio.pause(); return; }
+  const d = resumeFade();
+  rampTo(0, d);
+  pauseTimer = setTimeout(() => { pauseTimer = 0; audio.pause(); }, d * 1000);
+  renderPlayer();
+}
+
+function stopPlayback() {
+  cancelFade();
+  audio.pause();
+  const t = tracks[current];
+  audio.currentTime = t?.start ?? 0;
+  renderPlayer();
+}
+
+function select(i, play = true, fadeIn = QUICK_FADE) {
+  if (i < 0 || i >= tracks.length) return;
+  cancelFade();
+  current = i;
+  loadSource(tracks[i]);
+  if (play) playAudio(fadeIn);
   analyzeQueue();
   render();
   save();
@@ -471,37 +618,97 @@ function select(i, play = true) {
 function togglePlay() {
   if (!tracks.length) { pickFiles(); return; }
   if (current === -1) { select(0); return; }
-  if (audio.paused) audio.play().catch(() => {});
-  else audio.pause();
+  if (isPlaying()) pauseAudio();
+  else playAudio(resumeFade());
 }
 
 function next(fromEnded = false) {
   if (!tracks.length) return;
-  if (current < tracks.length - 1) select(current + 1, fromEnded || !audio.paused);
-  else if (!fromEnded) select(0, !audio.paused);
+  const play = fromEnded || isPlaying();
+  const fadeIn = fromEnded && fadeSec ? fadeSec : QUICK_FADE;
+  if (current < tracks.length - 1) select(current + 1, play, fadeIn);
+  else if (!fromEnded) select(0, play);
 }
 
 function prev() {
   if (!tracks.length) return;
-  if (audio.currentTime > 3) { audio.currentTime = 0; return; }
-  select(current > 0 ? current - 1 : 0, !audio.paused);
+  const start = tracks[current]?.start ?? 0;
+  if (audio.currentTime > start + 3) { audio.currentTime = start; return; }
+  select(current > 0 ? current - 1 : 0, isPlaying());
 }
 
 function setMode(i, mode) {
   const t = tracks[i];
   if (!t) return;
   t.mode = mode ?? (t.mode === "loop" ? "once" : "loop");
-  if (i === current) audio.loop = t.mode === "loop";
+  if (i === current) {
+    audio.loop = t.mode === "loop" && !isTrimmed(t);
+    if (t.mode === "loop" && fadeOutActive) { fadeOutActive = false; rampTo(1, QUICK_FADE); }
+  }
   toast(t.mode === "loop" ? "En bucle: se repite esta pista" : "Una vez: suena y continúa");
   render();
   save();
 }
 
-audio.addEventListener("ended", () => {
-  // Las pistas en bucle nunca llegan aquí (audio.loop = true)
+// Qué pasa al terminar una pista "una vez": un solo botón con tres estados
+//   continue → sigue con la siguiente
+//   once     → se detiene al terminar esta pista (una sola vez, luego vuelve a "continue")
+//   each     → se detiene al terminar cada pista
+const FLOW = {
+  continue: { icon: "auto", title: "Al terminar: sigue con la siguiente pista", toast: "Al terminar, sigue con la siguiente pista" },
+  once: { icon: "stopafter", title: "Al terminar: se detiene después de esta pista (solo esta vez)", toast: "Se detendrá al terminar esta pista" },
+  each: { icon: "stopeach", title: "Al terminar: se detiene después de cada pista", toast: "Se detendrá al terminar cada pista" },
+};
+const flowState = () => (!autoplay ? "each" : stopAfter ? "once" : "continue");
+
+function setFlow(state) {
+  autoplay = state !== "each";
+  stopAfter = state === "once";
+  toast(FLOW[state].toast);
+  renderPlayer();
+  save();
+}
+const cycleFlow = () => setFlow({ continue: "once", once: "each", each: "continue" }[flowState()]);
+const toggleStopAfter = () => setFlow(flowState() === "once" ? "continue" : "once");
+
+// Fin de la pista (natural o por el punto de fin del recorte)
+function trackEnded() {
+  const t = tracks[current];
+  if (!t) return;
+  if (t.mode === "loop") {
+    audio.currentTime = t.start ?? 0;
+    fadeOutActive = false;
+    if (audio.paused) playAudio(QUICK_FADE);
+    return;
+  }
+  if (stopAfter) {
+    stopAfter = false; // era solo por esta vez: vuelve a "sigue con la siguiente"
+    stopPlayback();
+    toast("Detenido al terminar la pista");
+    return;
+  }
   if (autoplay && current < tracks.length - 1) next(true);
-  else { audio.currentTime = 0; renderPlayer(); }
-});
+  else stopPlayback();
+}
+
+audio.addEventListener("ended", trackEnded);
+
+// Vigila el punto de fin y el fundido de salida mientras suena
+setInterval(() => {
+  const t = tracks[current];
+  if (!t || audio.paused || pauseTimer || !isFinite(audio.duration)) return;
+  const end = t.end != null ? Math.min(t.end, audio.duration) : audio.duration;
+  const left = end - audio.currentTime;
+  if (t.end != null && left <= 0.03) { trackEnded(); return; }
+  if (!fadeGain) return;
+  if (t.mode !== "loop" && fadeSec > 0 && left < fadeSec) {
+    fadeOutActive = true;
+    fadeGain.gain.setTargetAtTime(Math.max(0, left / fadeSec), audioCtx.currentTime, 0.03);
+  } else if (fadeOutActive) {
+    fadeOutActive = false; // se volvió atrás con la barra
+    rampTo(1, QUICK_FADE);
+  }
+}, 40);
 
 audio.addEventListener("error", () => {
   if (current < 0 || !audio.getAttribute("src")) return;
@@ -511,9 +718,14 @@ audio.addEventListener("error", () => {
   if (autoplay && current < tracks.length - 1) next(true);
 });
 
+audio.addEventListener("playing", () => {
+  if (pendingFadeIn != null) { rampTo(1, pendingFadeIn); pendingFadeIn = null; }
+});
 ["play", "pause"].forEach((e) => audio.addEventListener(e, () => { renderPlayer(); renderListState(); startSpectrum(); }));
 audio.addEventListener("play", ensureAudioGraph);
 audio.addEventListener("loadedmetadata", () => {
+  if (pendingStart != null && pendingStart < audio.duration) audio.currentTime = pendingStart;
+  pendingStart = null;
   if (current >= 0 && !tracks[current].duration) { tracks[current].duration = audio.duration; updateRow(tracks[current]); }
   renderTime();
 });
@@ -523,24 +735,38 @@ audio.addEventListener("timeupdate", renderTime);
 function render() {
   els.empty.classList.toggle("show", tracks.length === 0);
   els.list.innerHTML = tracks.map((t, i) => rowHtml(t, i)).join("");
+  if (drag?.active) markDragging();
   renderPlayer();
+}
+
+function durText(t) {
+  if (t.error) return "error";
+  if (t.duration == null) return "";
+  if (!isTrimmed(t)) return fmt(t.duration);
+  return fmt((t.end ?? t.duration) - (t.start ?? 0));
 }
 
 function rowHtml(t, i) {
   const active = i === current;
   const num = active
-    ? `<span class="bars${audio.paused ? " paused" : ""}"><i></i><i></i><i></i></span>`
+    ? `<span class="bars${isPlaying() ? "" : " paused"}"><i></i><i></i><i></i></span>`
     : i + 1;
   const loop = t.mode === "loop";
+  const trimmed = isTrimmed(t);
+  const artist = artistOf(t);
   return `
     <li class="row${active ? " active" : ""}${t.error ? " error" : ""}" data-i="${i}" data-id="${t.id}">
       <span class="num">${num}</span>
       <div class="title-cell">
-        <div class="t-name" title="${escapeHtml(t.path)}">${escapeHtml(t.name)}</div>
-        ${t.artist ? `<div class="t-artist">${escapeHtml(t.artist)}</div>` : ""}
+        <div class="cover">${coverHtml(t)}</div>
+        <div class="title-text">
+          <div class="t-name" title="${escapeHtml(t.path)}">${escapeHtml(titleOf(t))}</div>
+          ${artist ? `<div class="t-artist">${escapeHtml(artist)}</div>` : ""}
+        </div>
       </div>
       <span class="meta${t.analyzed ? "" : " pending"}">${metaText(t)}</span>
-      <span class="dur">${t.error ? "error" : t.duration != null ? fmt(t.duration) : ""}</span>
+      <span class="dur"${trimmed ? ` title="Duración con recorte (original ${fmt(t.duration)})"` : ""}>${durText(t)}</span>
+      <button class="chip trim${trimmed ? " on" : ""}" data-act="trim" title="${trimmed ? "Recortada — editar inicio y fin" : "Recortar inicio y fin"}">${icon("trim")}</button>
       <button class="chip mode${loop ? " on" : ""}" data-act="mode" title="${loop ? "En bucle (clic: una vez)" : "Una vez (clic: en bucle)"}">${icon(loop ? "loop" : "once")}</button>
       <button class="chip rm" data-act="rm" title="Quitar de la lista">${icon("x")}</button>
     </li>`;
@@ -548,29 +774,39 @@ function rowHtml(t, i) {
 
 function updateRow(t) {
   const li = els.list.querySelector(`[data-id="${t.id}"]`);
-  if (li) li.outerHTML = rowHtml(t, tracks.indexOf(t));
+  if (li) {
+    li.outerHTML = rowHtml(t, tracks.indexOf(t));
+    if (drag?.active && drag.id === t.id) markDragging();
+  }
 }
 
 function renderListState() {
   const bars = els.list.querySelector(".bars");
-  if (bars) bars.classList.toggle("paused", audio.paused);
+  if (bars) bars.classList.toggle("paused", !isPlaying());
 }
 
 function renderPlayer() {
   const t = tracks[current];
-  els.nowTitle.textContent = t ? t.name : "Nada sonando";
-  els.nowSub.textContent = t ? (t.artist || (t.mode === "loop" ? "En bucle" : "Una vez")) : (tracks.length ? "Elige una pista" : "—");
+  els.nowTitle.textContent = t ? titleOf(t) : "Nada sonando";
+  const sub = t ? [artistOf(t), t.tags?.album].filter(Boolean).join(" · ") : "";
+  els.nowSub.textContent = t ? (sub || (t.mode === "loop" ? "En bucle" : "Una vez")) : (tracks.length ? "Elige una pista" : "—");
+  els.nowCover.innerHTML = t ? coverHtml(t) : icon("note");
+
   let meta = "";
-  if (t && t.analyzed) {
-    if (t.bpm) meta += `<span class="tag">${Math.round(t.bpm)} BPM</span>`;
-    if (t.key) meta += `<span class="tag" title="Confianza ${Math.round((t.key.confidence || 0) * 100)}%">${keyLong(t.key)} · ${camelot(t.key)}</span>`;
-  } else if (t && analyzing === t) {
-    meta = `<span class="tag dim">Analizando BPM y tonalidad…</span>`;
+  if (t && flowState() === "once") meta += `<span class="tag stop">Se detiene al terminar</span>`;
+  if (t) {
+    const bpm = bpmOf(t), key = keyOf(t);
+    const bpmSrc = tagBpm(t) ? "Según la etiqueta del archivo" : "Detectado automáticamente";
+    const keySrc = key?.fromTag ? "Según la etiqueta del archivo" : `Detectada automáticamente · confianza ${Math.round((key?.confidence || 0) * 100)}%`;
+    if (bpm && (tagBpm(t) || t.analyzed)) meta += `<span class="tag" title="${bpmSrc}">${Math.round(bpm)} BPM</span>`;
+    if (key && (key.fromTag || t.analyzed)) meta += `<span class="tag" title="${keySrc}">${keyLong(key)} · ${camelot(key)}</span>`;
+    if (!t.analyzed && analyzing === t && !(tagBpm(t) && tagKey(t))) meta += `<span class="tag dim">Analizando…</span>`;
   }
   els.nowMeta.innerHTML = meta;
 
-  els.play.innerHTML = icon(audio.paused ? "play" : "pause");
-  els.play.title = audio.paused ? "Reproducir (Espacio)" : "Pausar (Espacio)";
+  const playing = isPlaying();
+  els.play.innerHTML = icon(playing ? "pause" : "play");
+  els.play.title = playing ? "Pausar (Espacio)" : "Reproducir (Espacio)";
 
   const loop = t && t.mode === "loop";
   els.mode.innerHTML = icon(loop ? "loop" : "once");
@@ -578,16 +814,22 @@ function renderPlayer() {
   els.mode.disabled = !t;
   els.mode.title = loop ? "Pista en bucle — clic para reproducir una vez" : "Pista una vez — clic para ponerla en bucle";
 
-  els.autoplay.classList.toggle("on", autoplay);
-  els.autoplay.title = autoplay ? "Reproducción automática: activada" : "Reproducción automática: desactivada";
+  const flow = flowState();
+  els.flow.innerHTML = icon(FLOW[flow].icon);
+  els.flow.classList.toggle("on", flow !== "each");
+  els.flow.classList.toggle("armed", flow === "once");
+  els.flow.title = `${FLOW[flow].title} — clic para cambiar (A)`;
 
   els.prev.disabled = els.next.disabled = !tracks.length;
   els.mute.innerHTML = icon(muted || volume === 0 ? "mute" : "vol");
   els.seek.disabled = !t;
 
   if ("mediaSession" in navigator && t) {
-    navigator.mediaSession.metadata = new MediaMetadata({ title: t.name, artist: t.artist || "Onda" });
-    navigator.mediaSession.playbackState = audio.paused ? "paused" : "playing";
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: titleOf(t), artist: artistOf(t) || "Onda", album: t.tags?.album || "",
+      artwork: t.cover ? [{ src: t.cover }] : [],
+    });
+    navigator.mediaSession.playbackState = playing ? "playing" : "paused";
   }
   renderTime();
 }
@@ -600,7 +842,229 @@ function renderTime() {
     els.seek.value = isFinite(d) && d > 0 ? Math.round((audio.currentTime / d) * 1000) : 0;
     setRangeFill(els.seek);
   }
+  // Zonas recortadas en la barra de progreso
+  const t = tracks[current];
+  const ok = t && isFinite(d) && d > 0;
+  const s = ok && t.start != null ? (t.start / d) * 100 : 0;
+  const e = ok && t.end != null ? (Math.min(t.end, d) / d) * 100 : 100;
+  els.trimL.classList.toggle("show", s > 0);
+  els.trimR.classList.toggle("show", e < 100);
+  els.trimL.style.left = "0%";
+  els.trimL.style.width = `${s}%`;
+  els.trimR.style.left = `${e}%`;
+  els.trimR.style.width = `${100 - e}%`;
 }
+
+// ---------- Reordenar arrastrando ----------
+let drag = null;          // { id, startY, active, pointerId }
+let suppressClick = false;
+
+function moveTrack(from, to) {
+  const [t] = tracks.splice(from, 1);
+  tracks.splice(to, 0, t);
+  if (current === from) current = to;
+  else if (from < current && to >= current) current--;
+  else if (from > current && to <= current) current++;
+}
+
+function markDragging() {
+  els.list.querySelector(`[data-id="${drag.id}"]`)?.classList.add("dragging");
+}
+
+els.list.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0 || e.target.closest("[data-act]")) return;
+  const li = e.target.closest(".row");
+  if (li) drag = { id: +li.dataset.id, startY: e.clientY, active: false, pointerId: e.pointerId };
+});
+
+window.addEventListener("pointermove", (e) => {
+  if (!drag || e.pointerId !== drag.pointerId) return;
+  if (!drag.active) {
+    if (Math.abs(e.clientY - drag.startY) < 6) return;
+    drag.active = true;
+    els.list.classList.add("reordering");
+    markDragging();
+  }
+  e.preventDefault();
+  // desplazar la lista si se arrastra cerca de los bordes
+  const wrap = els.list.parentElement, r = wrap.getBoundingClientRect();
+  if (e.clientY < r.top + 36) wrap.scrollTop -= 10;
+  else if (e.clientY > r.bottom - 36) wrap.scrollTop += 10;
+  const over = document.elementFromPoint(e.clientX, e.clientY)?.closest(".row");
+  if (!over) return;
+  const from = tracks.findIndex((t) => t.id === drag.id);
+  const to = +over.dataset.i;
+  if (from >= 0 && from !== to) { moveTrack(from, to); render(); }
+});
+
+function endDrag() {
+  if (!drag) return;
+  if (drag.active) {
+    suppressClick = true;
+    setTimeout(() => (suppressClick = false), 0);
+    els.list.classList.remove("reordering");
+    drag = null;
+    render();
+    save();
+  }
+  drag = null;
+}
+window.addEventListener("pointerup", endDrag);
+window.addEventListener("pointercancel", endDrag);
+
+// ---------- Recortar inicio y fin ----------
+let trimTrack = null;
+
+function parseTime(s) {
+  s = s.trim().replace(",", ".");
+  if (!s) return null;
+  const parts = s.split(":").map(Number);
+  if (parts.length > 3 || parts.some((v) => !isFinite(v) || v < 0)) return NaN;
+  return parts.reduce((acc, v) => acc * 60 + v, 0);
+}
+const fmtPrecise = (s) => {
+  const m = Math.floor(s / 60), sec = s - m * 60;
+  return `${m}:${sec.toFixed(1).padStart(4, "0")}`;
+};
+
+function openTrim(i) {
+  trimTrack = tracks[i];
+  if (!trimTrack) return;
+  els.trimTitle.textContent = titleOf(trimTrack);
+  els.trimCover.innerHTML = coverHtml(trimTrack);
+  els.trimStart.value = trimTrack.start != null ? fmtPrecise(trimTrack.start) : "";
+  els.trimEnd.value = trimTrack.end != null ? fmtPrecise(trimTrack.end) : "";
+  els.trimStart.classList.remove("invalid");
+  els.trimEnd.classList.remove("invalid");
+  els.trimDialog.hidden = false;
+  updateTrimUI();
+  els.trimStart.focus();
+}
+
+function closeTrim() {
+  els.trimDialog.hidden = true;
+  trimTrack = null;
+}
+
+function updateTrimUI() {
+  const t = trimTrack;
+  if (!t) return;
+  const isCur = t === tracks[current];
+  els.trimStartNow.disabled = els.trimEndNow.disabled = !isCur;
+  let info = "";
+  if (t.duration != null) {
+    info = `Duración ${fmt(t.duration)}`;
+    if (isTrimmed(t)) info += ` · con recorte ${durText(t)}`;
+  }
+  if (!isCur) info += (info ? " · " : "") + "«Usar posición actual» funciona con la pista que está sonando";
+  els.trimInfo.textContent = info;
+}
+
+function setTrim(t, s, e) {
+  t.start = s != null && s > 0.05 ? s : null;
+  t.end = e != null && !(t.duration && e >= t.duration - 0.05) ? e : null;
+  if (t === tracks[current]) {
+    audio.loop = t.mode === "loop" && !isTrimmed(t);
+    if (t.start != null && audio.currentTime < t.start) audio.currentTime = t.start;
+  }
+  updateRow(t);
+  renderTime();
+  updateTrimUI();
+  save();
+}
+
+function applyTrimInputs() {
+  const t = trimTrack;
+  if (!t) return true;
+  const dur = t.duration ?? Infinity;
+  const s = parseTime(els.trimStart.value), e = parseTime(els.trimEnd.value);
+  const badS = Number.isNaN(s) || (s != null && s >= dur);
+  const badE = Number.isNaN(e) || (e != null && (e <= 0 || e > dur + 0.5)) ||
+    (!badS && s != null && e != null && e <= s + 0.5);
+  els.trimStart.classList.toggle("invalid", badS);
+  els.trimEnd.classList.toggle("invalid", badE);
+  if (badS || badE) {
+    els.trimInfo.textContent = "Revisa los tiempos: usa minutos:segundos, por ejemplo 0:12.5, y el fin debe ir después del inicio.";
+    return false;
+  }
+  setTrim(t, s, e);
+  return true;
+}
+
+[els.trimStart, els.trimEnd].forEach((input) => {
+  input.addEventListener("change", applyTrimInputs);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && applyTrimInputs()) closeTrim(); });
+});
+els.trimStartNow.addEventListener("click", () => {
+  const t = trimTrack;
+  setTrim(t, audio.currentTime, t.end != null && t.end > audio.currentTime + 0.5 ? t.end : null);
+  els.trimStart.value = t.start != null ? fmtPrecise(t.start) : "";
+  els.trimEnd.value = t.end != null ? fmtPrecise(t.end) : "";
+});
+els.trimEndNow.addEventListener("click", () => {
+  const t = trimTrack;
+  setTrim(t, t.start != null && t.start < audio.currentTime - 0.5 ? t.start : null, audio.currentTime);
+  els.trimStart.value = t.start != null ? fmtPrecise(t.start) : "";
+  els.trimEnd.value = t.end != null ? fmtPrecise(t.end) : "";
+});
+els.trimReset.addEventListener("click", () => {
+  setTrim(trimTrack, null, null);
+  els.trimStart.value = els.trimEnd.value = "";
+  els.trimStart.classList.remove("invalid");
+  els.trimEnd.classList.remove("invalid");
+});
+// Escuchar los últimos 5 segundos para comprobar cómo termina
+els.trimPreview.addEventListener("click", () => {
+  if (!applyTrimInputs()) return;
+  const t = trimTrack, i = tracks.indexOf(t);
+  const go = () => {
+    const end = t.end ?? audio.duration;
+    audio.currentTime = Math.max(end - 5, t.start ?? 0);
+    playAudio(QUICK_FADE);
+  };
+  if (t === tracks[current] && isFinite(audio.duration)) go();
+  else {
+    select(i, false);
+    audio.addEventListener("loadedmetadata", () => setTimeout(go, 0), { once: true });
+  }
+  updateTrimUI();
+});
+els.trimDone.addEventListener("click", () => { if (applyTrimInputs()) closeTrim(); });
+els.trimDialog.addEventListener("pointerdown", (e) => { if (e.target === els.trimDialog) closeTrim(); });
+
+function markHere(which) {
+  const t = tracks[current];
+  if (!t || !isFinite(audio.duration)) return;
+  const now = audio.currentTime;
+  if (which === "start") {
+    setTrim(t, now, t.end != null && t.end > now + 0.5 ? t.end : null);
+    toast(`Inicio marcado en ${fmtPrecise(now)}`);
+  } else {
+    setTrim(t, t.start != null && t.start < now - 0.5 ? t.start : null, now);
+    toast(`Fin marcado en ${fmtPrecise(now)}`);
+  }
+}
+
+// ---------- Ajustes ----------
+function renderFadeOpts() {
+  els.fadeOpts.querySelectorAll("button").forEach((b) => b.classList.toggle("on", +b.dataset.fade === fadeSec));
+}
+els.settings.addEventListener("click", (e) => {
+  e.stopPropagation();
+  els.settingsMenu.hidden = !els.settingsMenu.hidden;
+  renderFadeOpts();
+});
+document.addEventListener("click", (e) => {
+  if (!els.settingsMenu.hidden && !e.target.closest(".menu-wrap")) els.settingsMenu.hidden = true;
+});
+els.fadeOpts.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-fade]");
+  if (!b) return;
+  fadeSec = +b.dataset.fade;
+  renderFadeOpts();
+  toast(fadeSec ? `Fundido de ${fadeSec} s` : "Sin fundido");
+  save();
+});
 
 // ---------- Archivos ----------
 const fileInput = Object.assign(document.createElement("input"), { type: "file", accept: ".mp3,audio/mpeg", multiple: true });
@@ -641,23 +1105,20 @@ els.play.addEventListener("click", togglePlay);
 els.next.addEventListener("click", () => next());
 els.prev.addEventListener("click", prev);
 els.mode.addEventListener("click", () => setMode(current));
-els.autoplay.addEventListener("click", () => {
-  autoplay = !autoplay;
-  toast(autoplay ? "Reproducción automática activada" : "Reproducción automática desactivada");
-  renderPlayer();
-  save();
-});
+els.flow.addEventListener("click", cycleFlow);
 
 els.list.addEventListener("click", (e) => {
+  if (suppressClick) return;
   const li = e.target.closest(".row");
   if (!li) return;
   const i = +li.dataset.i;
   const act = e.target.closest("[data-act]")?.dataset.act;
   if (act === "mode") setMode(i);
   else if (act === "rm") removeTrack(i);
+  else if (act === "trim") openTrim(i);
 });
 els.list.addEventListener("dblclick", (e) => {
-  if (e.target.closest("[data-act]")) return;
+  if (suppressClick || e.target.closest("[data-act]")) return;
   const li = e.target.closest(".row");
   if (li) select(+li.dataset.i);
 });
@@ -695,22 +1156,33 @@ els.mute.addEventListener("click", () => { muted = !muted; applyVolume(); render
 
 // Atajos de teclado
 window.addEventListener("keydown", (e) => {
-  if (e.target.tagName === "INPUT" && e.key !== " ") return;
+  if (!els.trimDialog.hidden) {
+    if (e.key === "Escape") closeTrim();
+    return;
+  }
+  if (e.key === "Escape") { els.settingsMenu.hidden = true; return; }
+  if (e.target.tagName === "INPUT" && e.target.type !== "range") return;
+  if (e.ctrlKey && e.key === "ArrowRight") { next(); return; }
+  if (e.ctrlKey && e.key === "ArrowLeft") { prev(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
   if (e.key === " ") { e.preventDefault(); togglePlay(); }
-  else if (e.key === "ArrowRight" && e.ctrlKey) next();
-  else if (e.key === "ArrowLeft" && e.ctrlKey) prev();
   else if (e.key === "ArrowRight" && current >= 0) audio.currentTime = Math.min(audio.currentTime + 5, audio.duration || 0);
   else if (e.key === "ArrowLeft" && current >= 0) audio.currentTime = Math.max(audio.currentTime - 5, 0);
-  else if (e.key.toLowerCase() === "l" && current >= 0) setMode(current);
-  else if (e.key.toLowerCase() === "a") els.autoplay.click();
-  else if (e.key.toLowerCase() === "v") setVizMode(vizMode === "bars" ? "wave" : "bars");
+  else if (k === "l" && current >= 0) setMode(current);
+  else if (k === "a") cycleFlow();
+  else if (k === "s" && current >= 0) toggleStopAfter();
+  else if (k === "v") setVizMode(vizMode === "bars" ? "wave" : "bars");
+  else if (k === "i") markHere("start");
+  else if (k === "o") markHere("end");
+  else if (k === "r" && current >= 0) openTrim(current);
 });
 
-// Teclas multimedia del teclado / controles de Windows
+// Teclas multimedia del teclado / controles del sistema
 if ("mediaSession" in navigator) {
   const ms = navigator.mediaSession;
-  ms.setActionHandler("play", () => audio.play());
-  ms.setActionHandler("pause", () => audio.pause());
+  ms.setActionHandler("play", () => playAudio(resumeFade()));
+  ms.setActionHandler("pause", pauseAudio);
   ms.setActionHandler("nexttrack", () => next());
   ms.setActionHandler("previoustrack", prev);
 }
@@ -719,6 +1191,8 @@ if ("mediaSession" in navigator) {
 load();
 applyVolume();
 render();
+renderFadeOpts();
 probeDurations();
+readTagsQueue();
 analyzeQueue();
 startSpectrum();

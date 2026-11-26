@@ -4,9 +4,11 @@ Reproductor de MP3 de escritorio, minimalista, hecho con [Tauri 2](https://tauri
 
 ## Funciones
 
-- Lista de reproducción: agregar con el botón o arrastrando archivos desde el Explorador.
+- Lista de reproducción: agregar con el botón o arrastrando archivos desde el Explorador; reordenar arrastrando.
+- Carátula, título, artista y álbum desde las etiquetas del MP3.
 - Modo por pista: **una vez** (suena y sigue) o **en bucle** (se repite).
-- Reproducción automática de la lista.
+- **Recorte** de inicio y fin por pista, **fundidos** y **detener después de esta pista**.
+- Al terminar una pista: **seguir** con la lista, **detener esta vez** o **detener cada pista** (un solo botón).
 - Visualización en tiempo real: **espectro** de barras u **ondas** (osciloscopio).
 - Análisis automático de **BPM** y **tonalidad** (notación latina y Camelot).
 - Tema claro u oscuro según Windows; la lista y las preferencias se guardan al cerrar.
@@ -26,8 +28,11 @@ Descarga el instalador desde la [última versión](https://github.com/LuisSubiab
 | `←` / `→` | Retroceder / avanzar 5 s |
 | `Ctrl` + `←` / `→` | Pista anterior / siguiente |
 | `L` | Bucle de la pista actual |
-| `A` | Reproducción automática |
+| `A` | Cambiar qué pasa al terminar una pista: seguir / detener esta vez / detener cada pista |
 | `V` | Cambiar entre espectro y ondas |
+| `S` | Detener al terminar la pista actual (solo esta vez) |
+| `I` / `O` | Marcar inicio / fin de la pista en la posición actual |
+| `R` | Abrir el editor de recorte de la pista actual |
 
 También responde a las teclas multimedia del teclado.
 
