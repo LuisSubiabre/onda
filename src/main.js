@@ -310,6 +310,82 @@ function drawSpectrum() {
   g.clearRect(0, 0, w, h);
 
   const live = analyser && !audio.paused;
+  const css = getComputedStyle(document.documentElement);
+  const colors = {
+    a1: css.getPropertyValue("--accent").trim(),
+    a2: css.getPropertyValue("--accent-2").trim(),
+    faint: css.getPropertyValue("--faint").trim(),
+  };
+  const active = vizMode === "wave" ? drawWave(g, w, h, live, colors) : drawBars(g, w, h, live, colors);
+  if (live || active) startSpectrum();
+}
+
+// ---------- Osciloscopio (ondas) ----------
+let timeData = null;
+const WAVE_POINTS = 512;
+const waveShape = new Float32Array(WAVE_POINTS);
+let waveEnv = 0.3;
+
+function drawWave(g, w, h, live, { a1, a2, faint }) {
+  let active = false;
+  if (live) {
+    if (!timeData || timeData.length !== analyser.fftSize) timeData = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(timeData);
+    // Buscar un cruce por cero ascendente para que la onda se vea quieta
+    let start = 0;
+    const span = Math.min(timeData.length - WAVE_POINTS * 2, timeData.length / 2);
+    for (let i = 1; i < span; i++) {
+      if (timeData[i - 1] < 0 && timeData[i] >= 0) { start = i; break; }
+    }
+    // Ganancia automática: grabaciones suaves también llenan la franja
+    let peak = 0;
+    for (let i = 0; i < timeData.length; i++) peak = Math.max(peak, Math.abs(timeData[i]));
+    waveEnv = Math.max(peak, waveEnv * 0.985);
+    const gain = 0.9 / Math.max(waveEnv, 0.04);
+    for (let i = 0; i < WAVE_POINTS; i++) {
+      const v = (timeData[start + i * 2] || 0) * gain;
+      waveShape[i] = waveShape[i] * 0.35 + v * 0.65; // suavizado leve entre cuadros
+    }
+  } else {
+    for (let i = 0; i < WAVE_POINTS; i++) waveShape[i] *= 0.85; // se aplana al pausar
+  }
+  for (let i = 0; i < WAVE_POINTS; i++) if (Math.abs(waveShape[i]) > 0.002) { active = true; break; }
+
+  const mid = h / 2;
+  const amp = h / 2 - 4;
+
+  // línea central tenue
+  g.fillStyle = faint;
+  g.fillRect(0, Math.round(mid), w, 1);
+
+  const grad = g.createLinearGradient(0, 0, w, 0);
+  grad.addColorStop(0, a1); grad.addColorStop(1, a2);
+
+  const path = () => {
+    g.beginPath();
+    for (let i = 0; i < WAVE_POINTS; i++) {
+      const x = (i / (WAVE_POINTS - 1)) * w;
+      const y = mid - Math.max(-1, Math.min(1, waveShape[i])) * amp;
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+  };
+  g.lineJoin = "round";
+  g.lineCap = "round";
+  // brillo suave detrás
+  path();
+  g.strokeStyle = grad;
+  g.globalAlpha = 0.25;
+  g.lineWidth = 6;
+  g.stroke();
+  // trazo principal
+  g.globalAlpha = 1;
+  g.lineWidth = 2;
+  g.stroke();
+  return active;
+}
+
+// ---------- Barras (espectro) ----------
+function drawBars(g, w, h, live, { a1, a2, faint }) {
   if (live) analyser.getByteFrequencyData(freqData);
 
   let active = false;
@@ -326,9 +402,6 @@ function drawSpectrum() {
     if (barLevels[i] > 0.002 || barPeaks[i] > 0.002) active = true;
   }
 
-  const css = getComputedStyle(document.documentElement);
-  const a1 = css.getPropertyValue("--accent").trim(), a2 = css.getPropertyValue("--accent-2").trim();
-  const faint = css.getPropertyValue("--faint").trim();
   const grad = g.createLinearGradient(0, 0, w, 0);
   grad.addColorStop(0, a1); grad.addColorStop(1, a2);
 
@@ -349,9 +422,25 @@ function drawSpectrum() {
     const py = h - barPeaks[i] * (h - 6) - 3;
     if (barPeaks[i] > 0.02) { g.fillStyle = a1; g.fillRect(x, py, bw, 2); }
   }
-
-  if (live || active) startSpectrum();
+  return active;
 }
+
+// ---------- Selector de visualización ----------
+const VIZ_KEY = "onda.viz";
+let vizMode = (() => { try { return localStorage.getItem(VIZ_KEY) === "wave" ? "wave" : "bars"; } catch { return "bars"; } })();
+
+function setVizMode(mode) {
+  vizMode = mode;
+  try { localStorage.setItem(VIZ_KEY, mode); } catch {}
+  document.querySelectorAll(".viz-switch button").forEach((b) => b.classList.toggle("on", b.dataset.viz === mode));
+  startSpectrum();
+}
+document.querySelectorAll(".viz-switch button").forEach((b) => b.addEventListener("click", (e) => {
+  e.stopPropagation();
+  setVizMode(b.dataset.viz);
+}));
+els.spectrum.addEventListener("click", () => setVizMode(vizMode === "bars" ? "wave" : "bars"));
+setVizMode(vizMode);
 
 function roundTop(g, x, y, w, h, r) {
   g.beginPath();
@@ -614,6 +703,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "ArrowLeft" && current >= 0) audio.currentTime = Math.max(audio.currentTime - 5, 0);
   else if (e.key.toLowerCase() === "l" && current >= 0) setMode(current);
   else if (e.key.toLowerCase() === "a") els.autoplay.click();
+  else if (e.key.toLowerCase() === "v") setVizMode(vizMode === "bars" ? "wave" : "bars");
 });
 
 // Teclas multimedia del teclado / controles de Windows

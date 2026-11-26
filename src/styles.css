@@ -46,7 +46,19 @@ svg { width: 20px; height: 20px; flex: none; }
 
 /* Espectro */
 .viz { height: 72px; padding: 0 24px; position: relative; }
-.viz canvas { width: 100%; height: 100%; display: block; }
+.viz canvas { width: 100%; height: 100%; display: block; cursor: pointer; }
+.viz-switch {
+  position: absolute; top: 0; right: 24px; display: flex; gap: 2px; padding: 2px;
+  border-radius: 8px; background: var(--panel); box-shadow: 0 0 0 1px var(--faint);
+  opacity: 0; transition: opacity .15s;
+}
+.viz:hover .viz-switch { opacity: 1; }
+.viz-switch button {
+  width: 24px; height: 22px; border-radius: 6px; display: grid; place-items: center; color: var(--muted);
+}
+.viz-switch button svg { width: 14px; height: 14px; }
+.viz-switch button:hover { color: var(--text); }
+.viz-switch button.on { color: var(--accent); background: var(--accent-soft); }
 
 /* Info del análisis */
 .meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; padding: 0 6px; }
