@@ -19,6 +19,10 @@
     <symbol id="i-vol" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M16 9.5l5 5M21 9.5l-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-auto" viewBox="0 0 24 24"><path d="M4 6h11M4 12h11M4 18h7M17 15v6l4.5-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-stopafter" viewBox="0 0 24 24"><path d="M3 7h9M3 12h9M3 17h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="14.5" y="12.5" width="7" height="7" rx="1.5" fill="currentColor"/></symbol>
+    <symbol id="i-trim" viewBox="0 0 24 24"><path d="M6 3v13a2 2 0 0 0 2 2h13M18 21V8a2 2 0 0 0-2-2H3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="10" cy="17" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+    <symbol id="i-note" viewBox="0 0 24 24"><path d="M9 18V6l11-2v12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6.5" cy="18" r="2.5" fill="currentColor"/><circle cx="17.5" cy="16" r="2.5" fill="currentColor"/></symbol>
     <symbol id="i-bars" viewBox="0 0 24 24"><path d="M5 20v-6M9.5 20V8M14 20v-9M18.5 20V4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
     <symbol id="i-wave" viewBox="0 0 24 24"><path d="M2 12c2-6 4-6 5 0s3 6 5 0 3-6 5 0 3 5 5 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   </svg>
@@ -30,6 +34,20 @@
         <span>Onda</span>
       </div>
       <div class="top-actions">
+        <div class="menu-wrap">
+          <button id="settings" class="ghost icon-only" title="Ajustes"><svg><use href="#i-settings"/></svg></button>
+          <div id="settings-menu" class="popover" hidden>
+            <div class="pop-label">Fundido al pausar y entre pistas</div>
+            <div id="fade-opts" class="segmented">
+              <button data-fade="0">No</button>
+              <button data-fade="1">1 s</button>
+              <button data-fade="2">2 s</button>
+              <button data-fade="3">3 s</button>
+              <button data-fade="5">5 s</button>
+            </div>
+            <div class="pop-hint">Las pistas en bucle se repiten sin fundido.</div>
+          </div>
+        </div>
         <button id="clear" class="ghost" title="Vaciar lista">Vaciar</button>
         <button id="add" class="primary"><svg><use href="#i-plus"/></svg>Agregar</button>
       </div>
@@ -54,9 +72,12 @@
 
     <footer class="player">
       <div class="now">
-        <div id="now-title" class="now-title">Nada sonando</div>
-        <div id="now-sub" class="now-sub">—</div>
-        <div id="now-meta" class="now-meta"></div>
+        <div id="now-cover" class="cover big"><svg><use href="#i-note"/></svg></div>
+        <div class="now-text">
+          <div id="now-title" class="now-title">Nada sonando</div>
+          <div id="now-sub" class="now-sub">—</div>
+          <div id="now-meta" class="now-meta"></div>
+        </div>
       </div>
 
       <div class="center">
@@ -66,10 +87,15 @@
           <button id="play" class="icon play" title="Reproducir (Espacio)"><svg><use href="#i-play"/></svg></button>
           <button id="next" class="icon" title="Siguiente"><svg><use href="#i-next"/></svg></button>
           <button id="autoplay" class="icon small" title="Reproducción automática de la lista"><svg><use href="#i-auto"/></svg></button>
+          <button id="stopafter" class="icon small" title="Detener después de esta pista (S)"><svg><use href="#i-stopafter"/></svg></button>
         </div>
         <div class="seek">
           <span id="t-cur" class="time">0:00</span>
-          <input id="seek" type="range" min="0" max="1000" value="0" step="1" />
+          <div class="seek-bar">
+            <div id="trim-l" class="trim-mask"></div>
+            <div id="trim-r" class="trim-mask"></div>
+            <input id="seek" type="range" min="0" max="1000" value="0" step="1" />
+          </div>
           <span id="t-dur" class="time">0:00</span>
         </div>
       </div>
@@ -79,6 +105,35 @@
         <input id="vol" type="range" min="0" max="100" value="80" />
       </div>
     </footer>
+
+    <div id="trim-dialog" class="dialog-back" hidden>
+      <div class="dialog" role="dialog" aria-labelledby="trim-title">
+        <div class="dialog-head">
+          <div id="trim-cover" class="cover"><svg><use href="#i-note"/></svg></div>
+          <div class="dialog-titles">
+            <div class="pop-label">Recortar pista</div>
+            <div id="trim-title" class="dialog-title"></div>
+          </div>
+        </div>
+        <div class="trim-row">
+          <label for="trim-start">Inicio</label>
+          <input id="trim-start" class="time-input" placeholder="0:00" autocomplete="off" />
+          <button id="trim-start-now" class="ghost small">Usar posición actual</button>
+        </div>
+        <div class="trim-row">
+          <label for="trim-end">Fin</label>
+          <input id="trim-end" class="time-input" placeholder="final" autocomplete="off" />
+          <button id="trim-end-now" class="ghost small">Usar posición actual</button>
+        </div>
+        <div id="trim-info" class="pop-hint"></div>
+        <div class="dialog-actions">
+          <button id="trim-reset" class="ghost">Quitar recorte</button>
+          <span class="spacer"></span>
+          <button id="trim-preview" class="ghost">Escuchar el final</button>
+          <button id="trim-done" class="primary">Listo</button>
+        </div>
+      </div>
+    </div>
 
     <div id="drop" class="drop"><div>Suelta para agregar</div></div>
     <div id="toast" class="toast"></div>
