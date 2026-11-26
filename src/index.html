@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Onda</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z" fill="currentColor"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1.2" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1.2" fill="currentColor"/></symbol>
+    <symbol id="i-prev" viewBox="0 0 24 24"><path d="M18 6.5v11a1 1 0 0 1-1.55.83L9 13.2V17a1 1 0 0 1-2 0V7a1 1 0 0 1 2 0v3.8l7.45-5.13A1 1 0 0 1 18 6.5z" fill="currentColor"/></symbol>
+    <symbol id="i-next" viewBox="0 0 24 24"><path d="M6 6.5v11a1 1 0 0 0 1.55.83L15 13.2V17a1 1 0 0 0 2 0V7a1 1 0 0 0-2 0v3.8L7.55 5.67A1 1 0 0 0 6 6.5z" fill="currentColor"/></symbol>
+    <symbol id="i-loop" viewBox="0 0 24 24"><path d="M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-once" viewBox="0 0 24 24"><path d="M5 12h12M13 7l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-vol" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M16 9.5l5 5M21 9.5l-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-auto" viewBox="0 0 24 24"><path d="M4 6h11M4 12h11M4 18h7M17 15v6l4.5-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </svg>
+
+  <div class="app">
+    <header class="top">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <span>Onda</span>
+      </div>
+      <div class="top-actions">
+        <button id="clear" class="ghost" title="Vaciar lista">Vaciar</button>
+        <button id="add" class="primary"><svg><use href="#i-plus"/></svg>Agregar</button>
+      </div>
+    </header>
+
+    <main class="list-wrap">
+      <ol id="list" class="list"></ol>
+      <div id="empty" class="empty">
+        <div class="empty-ring"><svg><use href="#i-plus"/></svg></div>
+        <p class="empty-title">Tu lista está vacía</p>
+        <p class="empty-sub">Arrastra archivos MP3 aquí o usa <b>Agregar</b></p>
+      </div>
+    </main>
+
+    <footer class="player">
+      <div class="now">
+        <div id="now-title" class="now-title">Nada sonando</div>
+        <div id="now-sub" class="now-sub">—</div>
+      </div>
+
+      <div class="center">
+        <div class="controls">
+          <button id="mode" class="icon small" title="Modo de la pista"><svg><use href="#i-once"/></svg></button>
+          <button id="prev" class="icon" title="Anterior"><svg><use href="#i-prev"/></svg></button>
+          <button id="play" class="icon play" title="Reproducir (Espacio)"><svg><use href="#i-play"/></svg></button>
+          <button id="next" class="icon" title="Siguiente"><svg><use href="#i-next"/></svg></button>
+          <button id="autoplay" class="icon small" title="Reproducción automática de la lista"><svg><use href="#i-auto"/></svg></button>
+        </div>
+        <div class="seek">
+          <span id="t-cur" class="time">0:00</span>
+          <input id="seek" type="range" min="0" max="1000" value="0" step="1" />
+          <span id="t-dur" class="time">0:00</span>
+        </div>
+      </div>
+
+      <div class="volume">
+        <button id="mute" class="icon small" title="Silenciar"><svg><use href="#i-vol"/></svg></button>
+        <input id="vol" type="range" min="0" max="100" value="80" />
+      </div>
+    </footer>
+
+    <div id="drop" class="drop"><div>Suelta para agregar</div></div>
+    <div id="toast" class="toast"></div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>
