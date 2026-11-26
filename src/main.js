@@ -8,11 +8,11 @@ const STORAGE_KEY = "onda.state.v1";
 const $ = (id) => document.getElementById(id);
 const els = {
   list: $("list"), empty: $("empty"), add: $("add"), clear: $("clear"),
-  play: $("play"), prev: $("prev"), next: $("next"), mode: $("mode"), autoplay: $("autoplay"),
+  play: $("play"), prev: $("prev"), next: $("next"), mode: $("mode"), flow: $("flow"),
   seek: $("seek"), cur: $("t-cur"), dur: $("t-dur"), vol: $("vol"), mute: $("mute"),
   nowTitle: $("now-title"), nowSub: $("now-sub"), nowMeta: $("now-meta"),
   drop: $("drop"), toast: $("toast"), spectrum: $("spectrum"),
-  nowCover: $("now-cover"), stopAfter: $("stopafter"), trimL: $("trim-l"), trimR: $("trim-r"),
+  nowCover: $("now-cover"), trimL: $("trim-l"), trimR: $("trim-r"),
   settings: $("settings"), settingsMenu: $("settings-menu"), fadeOpts: $("fade-opts"),
   trimDialog: $("trim-dialog"), trimTitle: $("trim-title"), trimCover: $("trim-cover"),
   trimStart: $("trim-start"), trimEnd: $("trim-end"), trimStartNow: $("trim-start-now"), trimEndNow: $("trim-end-now"),
@@ -650,11 +650,26 @@ function setMode(i, mode) {
   save();
 }
 
-function toggleStopAfter() {
-  stopAfter = !stopAfter;
-  toast(stopAfter ? "Se detendrá al terminar esta pista" : "Seguirá con la siguiente pista");
+// Qué pasa al terminar una pista "una vez": un solo botón con tres estados
+//   continue → sigue con la siguiente
+//   once     → se detiene al terminar esta pista (una sola vez, luego vuelve a "continue")
+//   each     → se detiene al terminar cada pista
+const FLOW = {
+  continue: { icon: "auto", title: "Al terminar: sigue con la siguiente pista", toast: "Al terminar, sigue con la siguiente pista" },
+  once: { icon: "stopafter", title: "Al terminar: se detiene después de esta pista (solo esta vez)", toast: "Se detendrá al terminar esta pista" },
+  each: { icon: "stopeach", title: "Al terminar: se detiene después de cada pista", toast: "Se detendrá al terminar cada pista" },
+};
+const flowState = () => (!autoplay ? "each" : stopAfter ? "once" : "continue");
+
+function setFlow(state) {
+  autoplay = state !== "each";
+  stopAfter = state === "once";
+  toast(FLOW[state].toast);
   renderPlayer();
+  save();
 }
+const cycleFlow = () => setFlow({ continue: "once", once: "each", each: "continue" }[flowState()]);
+const toggleStopAfter = () => setFlow(flowState() === "once" ? "continue" : "once");
 
 // Fin de la pista (natural o por el punto de fin del recorte)
 function trackEnded() {
@@ -667,7 +682,7 @@ function trackEnded() {
     return;
   }
   if (stopAfter) {
-    stopAfter = false;
+    stopAfter = false; // era solo por esta vez: vuelve a "sigue con la siguiente"
     stopPlayback();
     toast("Detenido al terminar la pista");
     return;
@@ -778,7 +793,7 @@ function renderPlayer() {
   els.nowCover.innerHTML = t ? coverHtml(t) : icon("note");
 
   let meta = "";
-  if (t && stopAfter) meta += `<span class="tag">Se detiene al terminar</span>`;
+  if (t && flowState() === "once") meta += `<span class="tag stop">Se detiene al terminar</span>`;
   if (t) {
     const bpm = bpmOf(t), key = keyOf(t);
     const bpmSrc = tagBpm(t) ? "Según la etiqueta del archivo" : "Detectado automáticamente";
@@ -799,11 +814,11 @@ function renderPlayer() {
   els.mode.disabled = !t;
   els.mode.title = loop ? "Pista en bucle — clic para reproducir una vez" : "Pista una vez — clic para ponerla en bucle";
 
-  els.autoplay.classList.toggle("on", autoplay);
-  els.autoplay.title = autoplay ? "Reproducción automática: activada (A)" : "Reproducción automática: desactivada (A)";
-  els.stopAfter.classList.toggle("on", stopAfter);
-  els.stopAfter.disabled = !t;
-  els.stopAfter.title = stopAfter ? "Se detendrá al terminar esta pista (S)" : "Detener después de esta pista (S)";
+  const flow = flowState();
+  els.flow.innerHTML = icon(FLOW[flow].icon);
+  els.flow.classList.toggle("on", flow !== "each");
+  els.flow.classList.toggle("armed", flow === "once");
+  els.flow.title = `${FLOW[flow].title} — clic para cambiar (A)`;
 
   els.prev.disabled = els.next.disabled = !tracks.length;
   els.mute.innerHTML = icon(muted || volume === 0 ? "mute" : "vol");
@@ -1090,13 +1105,7 @@ els.play.addEventListener("click", togglePlay);
 els.next.addEventListener("click", () => next());
 els.prev.addEventListener("click", prev);
 els.mode.addEventListener("click", () => setMode(current));
-els.stopAfter.addEventListener("click", toggleStopAfter);
-els.autoplay.addEventListener("click", () => {
-  autoplay = !autoplay;
-  toast(autoplay ? "Reproducción automática activada" : "Reproducción automática desactivada");
-  renderPlayer();
-  save();
-});
+els.flow.addEventListener("click", cycleFlow);
 
 els.list.addEventListener("click", (e) => {
   if (suppressClick) return;
@@ -1161,7 +1170,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "ArrowRight" && current >= 0) audio.currentTime = Math.min(audio.currentTime + 5, audio.duration || 0);
   else if (e.key === "ArrowLeft" && current >= 0) audio.currentTime = Math.max(audio.currentTime - 5, 0);
   else if (k === "l" && current >= 0) setMode(current);
-  else if (k === "a") els.autoplay.click();
+  else if (k === "a") cycleFlow();
   else if (k === "s" && current >= 0) toggleStopAfter();
   else if (k === "v") setVizMode(vizMode === "bars" ? "wave" : "bars");
   else if (k === "i") markHere("start");
