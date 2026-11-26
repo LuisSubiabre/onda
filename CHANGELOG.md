@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar (rama feature/mejoras-v0.3)
+## 0.3.0
 
 - Reordenar la lista arrastrando las pistas.
 - Carátula, título, artista y álbum leídos de las etiquetas ID3 del MP3 (con el compositor como respaldo del artista).
