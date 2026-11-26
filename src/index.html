@@ -19,6 +19,8 @@
     <symbol id="i-vol" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M16 9.5l5 5M21 9.5l-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-auto" viewBox="0 0 24 24"><path d="M4 6h11M4 12h11M4 18h7M17 15v6l4.5-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-bars" viewBox="0 0 24 24"><path d="M5 20v-6M9.5 20V8M14 20v-9M18.5 20V4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+    <symbol id="i-wave" viewBox="0 0 24 24"><path d="M2 12c2-6 4-6 5 0s3 6 5 0 3-6 5 0 3 5 5 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   </svg>
 
   <div class="app">
@@ -42,10 +44,19 @@
       </div>
     </main>
 
+    <div class="viz">
+      <canvas id="spectrum" title="Clic para cambiar la visualización (V)"></canvas>
+      <div class="viz-switch" role="group" aria-label="Visualización">
+        <button data-viz="bars" title="Espectro"><svg><use href="#i-bars"/></svg></button>
+        <button data-viz="wave" title="Ondas"><svg><use href="#i-wave"/></svg></button>
+      </div>
+    </div>
+
     <footer class="player">
       <div class="now">
         <div id="now-title" class="now-title">Nada sonando</div>
         <div id="now-sub" class="now-sub">—</div>
+        <div id="now-meta" class="now-meta"></div>
       </div>
 
       <div class="center">

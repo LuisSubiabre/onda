@@ -10,11 +10,13 @@ const els = {
   list: $("list"), empty: $("empty"), add: $("add"), clear: $("clear"),
   play: $("play"), prev: $("prev"), next: $("next"), mode: $("mode"), autoplay: $("autoplay"),
   seek: $("seek"), cur: $("t-cur"), dur: $("t-dur"), vol: $("vol"), mute: $("mute"),
-  nowTitle: $("now-title"), nowSub: $("now-sub"), drop: $("drop"), toast: $("toast"),
+  nowTitle: $("now-title"), nowSub: $("now-sub"), nowMeta: $("now-meta"),
+  drop: $("drop"), toast: $("toast"), spectrum: $("spectrum"),
 };
 
 const audio = new Audio();
 audio.preload = "auto";
+audio.crossOrigin = "anonymous"; // necesario para que el espectro pueda leer el audio
 
 // Estado
 let tracks = [];        // { id, path, url, name, artist, mode: "once" | "loop", duration, error }
@@ -61,7 +63,7 @@ function save() {
   if (!TAURI) return; // en el navegador las URLs de blob no sobreviven a recargar
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      tracks: tracks.map(({ path, mode, duration }) => ({ path, mode, duration })),
+      tracks: tracks.map(({ path, mode, duration, bpm, key, av }) => ({ path, mode, duration, bpm, key, av })),
       current, autoplay, volume, muted,
     }));
   } catch {}
@@ -75,7 +77,9 @@ function load() {
     autoplay = s.autoplay ?? true;
     volume = s.volume ?? 0.8;
     muted = s.muted ?? false;
-    tracks = (s.tracks || []).map((t) => makeTrack(t.path, null, t.mode, t.duration));
+    tracks = (s.tracks || []).map((t) => Object.assign(makeTrack(t.path, null, t.mode, t.duration), {
+      bpm: t.bpm ?? null, key: t.key ?? null, av: t.av ?? 0, analyzed: t.av === ANALYSIS_VERSION,
+    }));
     current = Math.min(s.current ?? -1, tracks.length - 1);
     if (current >= 0) {
       audio.src = tracks[current].url;
@@ -89,6 +93,7 @@ function makeTrack(path, url, mode = "once", duration = null) {
   const { name, artist } = parseName(path);
   return {
     id: ++uid, path, name, artist, mode, duration, error: false,
+    bpm: null, key: null, analyzed: false,
     url: url || (TAURI ? TAURI.core.convertFileSrc(path) : path),
   };
 }
@@ -114,6 +119,7 @@ function afterAdd(before, count) {
   render();
   save();
   probeDurations();
+  analyzeQueue();
   if (before === 0 && current === -1) select(0, false);
 }
 
@@ -170,6 +176,285 @@ async function probeDurations() {
   save();
 }
 
+// ---------- Análisis de BPM y tonalidad ----------
+const NOTES = ["Do", "Do♯", "Re", "Mi♭", "Mi", "Fa", "Fa♯", "Sol", "La♭", "La", "Si♭", "Si"];
+const NOTES_EN = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
+
+function camelot(key) {
+  const major = key.minor ? (key.tonic + 3) % 12 : key.tonic; // relativa mayor
+  return `${((major * 7 + 7) % 12) + 1}${key.minor ? "A" : "B"}`;
+}
+const keyShort = (k) => `${NOTES_EN[k.tonic]}${k.minor ? "m" : ""}`;
+const keyLong = (k) => `${NOTES[k.tonic]} ${k.minor ? "menor" : "mayor"}`;
+
+const ANALYSIS_RATE = 11025;   // basta para ritmo y notas, y es 4 veces más liviano
+const ANALYSIS_VERSION = 2;    // subirlo hace que se vuelvan a analizar las pistas guardadas
+let worker = null;
+let analyzing = null;          // pista en análisis
+const workerJobs = new Map();
+
+function getWorker() {
+  if (!worker) {
+    worker = new Worker("analyzer.js");
+    worker.onmessage = (e) => {
+      const job = workerJobs.get(e.data.id);
+      if (job) { workerJobs.delete(e.data.id); job(e.data); }
+    };
+  }
+  return worker;
+}
+
+async function analyzeTrack(t) {
+  const data = await (await fetch(t.url)).arrayBuffer();
+  const decoded = await new OfflineAudioContext(1, 1, 44100).decodeAudioData(data);
+  // Canción completa en mono a 11 kHz (el worker toma lo que necesita)
+  const off = new OfflineAudioContext(1, Math.ceil(decoded.duration * ANALYSIS_RATE), ANALYSIS_RATE);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start();
+  const rendered = await off.startRendering();
+  const samples = rendered.getChannelData(0).slice();
+  return new Promise((resolve) => {
+    workerJobs.set(t.id, resolve);
+    getWorker().postMessage({ id: t.id, samples, sampleRate: ANALYSIS_RATE }, [samples.buffer]);
+  });
+}
+
+// Analiza de a una pista; primero la que está sonando
+async function analyzeQueue() {
+  if (analyzing) return;
+  while (true) {
+    const pending = (t) => !t.analyzed && !t.error;
+    const t = (tracks[current] && pending(tracks[current])) ? tracks[current] : tracks.find(pending);
+    if (!t) break;
+    analyzing = t;
+    updateRow(t);
+    if (t === tracks[current]) renderPlayer();
+    try {
+      const res = await analyzeTrack(t);
+      t.bpm = res.bpm ?? null;
+      t.key = res.key ?? null;
+    } catch (err) {
+      console.warn("No se pudo analizar", t.path, err);
+    }
+    t.analyzed = true;
+    t.av = ANALYSIS_VERSION;
+    analyzing = null;
+    if (tracks.includes(t)) {
+      updateRow(t);
+      if (t === tracks[current]) renderPlayer();
+      save();
+    }
+  }
+}
+
+function metaText(t) {
+  if (!t.analyzed) return analyzing === t ? "analizando…" : "";
+  const parts = [];
+  if (t.bpm) parts.push(`${Math.round(t.bpm)} BPM`);
+  if (t.key) parts.push(keyShort(t.key));
+  return parts.join(" · ");
+}
+
+// ---------- Espectro ----------
+let audioCtx = null, analyser = null, gainNode = null, freqData = null;
+const BARS = 64;
+const barLevels = new Float32Array(BARS);
+const barPeaks = new Float32Array(BARS);
+let barEdges = null;
+let rafId = 0;
+
+function ensureAudioGraph() {
+  if (audioCtx) { if (audioCtx.state === "suspended") audioCtx.resume(); return; }
+  try {
+    audioCtx = new AudioContext();
+    const source = audioCtx.createMediaElementSource(audio);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 4096;
+    analyser.smoothingTimeConstant = 0.72;
+    analyser.minDecibels = -90;
+    analyser.maxDecibels = -20;
+    gainNode = audioCtx.createGain();
+    // El espectro se toma antes del volumen, así no cambia al bajarlo
+    source.connect(analyser);
+    analyser.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    applyVolume();
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    // Bandas logarítmicas de 35 Hz a 16 kHz
+    const binHz = audioCtx.sampleRate / analyser.fftSize;
+    barEdges = Array.from({ length: BARS + 1 }, (_, i) => {
+      const f = 35 * Math.pow(16000 / 35, i / BARS);
+      return Math.max(1, Math.round(f / binHz));
+    });
+  } catch (err) {
+    console.warn("Espectro no disponible", err);
+  }
+}
+
+function startSpectrum() {
+  if (!rafId) rafId = requestAnimationFrame(drawSpectrum);
+}
+
+function drawSpectrum() {
+  rafId = 0;
+  const c = els.spectrum;
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+  }
+  const g = c.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  const live = analyser && !audio.paused;
+  const css = getComputedStyle(document.documentElement);
+  const colors = {
+    a1: css.getPropertyValue("--accent").trim(),
+    a2: css.getPropertyValue("--accent-2").trim(),
+    faint: css.getPropertyValue("--faint").trim(),
+  };
+  const active = vizMode === "wave" ? drawWave(g, w, h, live, colors) : drawBars(g, w, h, live, colors);
+  if (live || active) startSpectrum();
+}
+
+// ---------- Osciloscopio (ondas) ----------
+let timeData = null;
+const WAVE_POINTS = 512;
+const waveShape = new Float32Array(WAVE_POINTS);
+let waveEnv = 0.3;
+
+function drawWave(g, w, h, live, { a1, a2, faint }) {
+  let active = false;
+  if (live) {
+    if (!timeData || timeData.length !== analyser.fftSize) timeData = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(timeData);
+    // Buscar un cruce por cero ascendente para que la onda se vea quieta
+    let start = 0;
+    const span = Math.min(timeData.length - WAVE_POINTS * 2, timeData.length / 2);
+    for (let i = 1; i < span; i++) {
+      if (timeData[i - 1] < 0 && timeData[i] >= 0) { start = i; break; }
+    }
+    // Ganancia automática: grabaciones suaves también llenan la franja
+    let peak = 0;
+    for (let i = 0; i < timeData.length; i++) peak = Math.max(peak, Math.abs(timeData[i]));
+    waveEnv = Math.max(peak, waveEnv * 0.985);
+    const gain = 0.9 / Math.max(waveEnv, 0.04);
+    for (let i = 0; i < WAVE_POINTS; i++) {
+      const v = (timeData[start + i * 2] || 0) * gain;
+      waveShape[i] = waveShape[i] * 0.35 + v * 0.65; // suavizado leve entre cuadros
+    }
+  } else {
+    for (let i = 0; i < WAVE_POINTS; i++) waveShape[i] *= 0.85; // se aplana al pausar
+  }
+  for (let i = 0; i < WAVE_POINTS; i++) if (Math.abs(waveShape[i]) > 0.002) { active = true; break; }
+
+  const mid = h / 2;
+  const amp = h / 2 - 4;
+
+  // línea central tenue
+  g.fillStyle = faint;
+  g.fillRect(0, Math.round(mid), w, 1);
+
+  const grad = g.createLinearGradient(0, 0, w, 0);
+  grad.addColorStop(0, a1); grad.addColorStop(1, a2);
+
+  const path = () => {
+    g.beginPath();
+    for (let i = 0; i < WAVE_POINTS; i++) {
+      const x = (i / (WAVE_POINTS - 1)) * w;
+      const y = mid - Math.max(-1, Math.min(1, waveShape[i])) * amp;
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+  };
+  g.lineJoin = "round";
+  g.lineCap = "round";
+  // brillo suave detrás
+  path();
+  g.strokeStyle = grad;
+  g.globalAlpha = 0.25;
+  g.lineWidth = 6;
+  g.stroke();
+  // trazo principal
+  g.globalAlpha = 1;
+  g.lineWidth = 2;
+  g.stroke();
+  return active;
+}
+
+// ---------- Barras (espectro) ----------
+function drawBars(g, w, h, live, { a1, a2, faint }) {
+  if (live) analyser.getByteFrequencyData(freqData);
+
+  let active = false;
+  for (let i = 0; i < BARS; i++) {
+    let v = 0;
+    if (live) {
+      let lo = barEdges[i], hi = Math.max(barEdges[i + 1], lo + 1);
+      for (let k = lo; k < hi && k < freqData.length; k++) v = Math.max(v, freqData[k]);
+      v /= 255;
+    }
+    // Subida rápida, bajada suave
+    barLevels[i] = v > barLevels[i] ? v : barLevels[i] * 0.88;
+    barPeaks[i] = Math.max(barLevels[i], barPeaks[i] - 0.012);
+    if (barLevels[i] > 0.002 || barPeaks[i] > 0.002) active = true;
+  }
+
+  const grad = g.createLinearGradient(0, 0, w, 0);
+  grad.addColorStop(0, a1); grad.addColorStop(1, a2);
+
+  const gap = 3;
+  const bw = Math.max(1, (w - gap * (BARS - 1)) / BARS);
+  for (let i = 0; i < BARS; i++) {
+    const x = i * (bw + gap);
+    // base tenue para que el espectro se vea aunque esté en silencio
+    g.fillStyle = faint;
+    g.fillRect(x, h - 2, bw, 2);
+    const bh = Math.max(0, barLevels[i] * (h - 6));
+    if (bh > 1) {
+      g.fillStyle = grad;
+      g.globalAlpha = 0.85;
+      roundTop(g, x, h - bh, bw, bh, Math.min(3, bw / 2));
+      g.globalAlpha = 1;
+    }
+    const py = h - barPeaks[i] * (h - 6) - 3;
+    if (barPeaks[i] > 0.02) { g.fillStyle = a1; g.fillRect(x, py, bw, 2); }
+  }
+  return active;
+}
+
+// ---------- Selector de visualización ----------
+const VIZ_KEY = "onda.viz";
+let vizMode = (() => { try { return localStorage.getItem(VIZ_KEY) === "wave" ? "wave" : "bars"; } catch { return "bars"; } })();
+
+function setVizMode(mode) {
+  vizMode = mode;
+  try { localStorage.setItem(VIZ_KEY, mode); } catch {}
+  document.querySelectorAll(".viz-switch button").forEach((b) => b.classList.toggle("on", b.dataset.viz === mode));
+  startSpectrum();
+}
+document.querySelectorAll(".viz-switch button").forEach((b) => b.addEventListener("click", (e) => {
+  e.stopPropagation();
+  setVizMode(b.dataset.viz);
+}));
+els.spectrum.addEventListener("click", () => setVizMode(vizMode === "bars" ? "wave" : "bars"));
+setVizMode(vizMode);
+
+function roundTop(g, x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x, y + h);
+  g.lineTo(x, y + r);
+  g.quadraticCurveTo(x, y, x + r, y);
+  g.lineTo(x + w - r, y);
+  g.quadraticCurveTo(x + w, y, x + w, y + r);
+  g.lineTo(x + w, y + h);
+  g.fill();
+}
+
+window.addEventListener("resize", startSpectrum);
+
 // ---------- Reproducción ----------
 function select(i, play = true) {
   if (i < 0 || i >= tracks.length) return;
@@ -178,6 +463,7 @@ function select(i, play = true) {
   audio.src = t.url;
   audio.loop = t.mode === "loop";
   if (play) audio.play().catch(() => {});
+  analyzeQueue();
   render();
   save();
 }
@@ -225,7 +511,8 @@ audio.addEventListener("error", () => {
   if (autoplay && current < tracks.length - 1) next(true);
 });
 
-["play", "pause"].forEach((e) => audio.addEventListener(e, () => { renderPlayer(); renderListState(); }));
+["play", "pause"].forEach((e) => audio.addEventListener(e, () => { renderPlayer(); renderListState(); startSpectrum(); }));
+audio.addEventListener("play", ensureAudioGraph);
 audio.addEventListener("loadedmetadata", () => {
   if (current >= 0 && !tracks[current].duration) { tracks[current].duration = audio.duration; updateRow(tracks[current]); }
   renderTime();
@@ -252,6 +539,7 @@ function rowHtml(t, i) {
         <div class="t-name" title="${escapeHtml(t.path)}">${escapeHtml(t.name)}</div>
         ${t.artist ? `<div class="t-artist">${escapeHtml(t.artist)}</div>` : ""}
       </div>
+      <span class="meta${t.analyzed ? "" : " pending"}">${metaText(t)}</span>
       <span class="dur">${t.error ? "error" : t.duration != null ? fmt(t.duration) : ""}</span>
       <button class="chip mode${loop ? " on" : ""}" data-act="mode" title="${loop ? "En bucle (clic: una vez)" : "Una vez (clic: en bucle)"}">${icon(loop ? "loop" : "once")}</button>
       <button class="chip rm" data-act="rm" title="Quitar de la lista">${icon("x")}</button>
@@ -272,6 +560,15 @@ function renderPlayer() {
   const t = tracks[current];
   els.nowTitle.textContent = t ? t.name : "Nada sonando";
   els.nowSub.textContent = t ? (t.artist || (t.mode === "loop" ? "En bucle" : "Una vez")) : (tracks.length ? "Elige una pista" : "—");
+  let meta = "";
+  if (t && t.analyzed) {
+    if (t.bpm) meta += `<span class="tag">${Math.round(t.bpm)} BPM</span>`;
+    if (t.key) meta += `<span class="tag" title="Confianza ${Math.round((t.key.confidence || 0) * 100)}%">${keyLong(t.key)} · ${camelot(t.key)}</span>`;
+  } else if (t && analyzing === t) {
+    meta = `<span class="tag dim">Analizando BPM y tonalidad…</span>`;
+  }
+  els.nowMeta.innerHTML = meta;
+
   els.play.innerHTML = icon(audio.paused ? "play" : "pause");
   els.play.title = audio.paused ? "Reproducir (Espacio)" : "Pausar (Espacio)";
 
@@ -376,8 +673,14 @@ els.seek.addEventListener("change", () => {
 });
 
 function applyVolume() {
-  audio.volume = volume;
-  audio.muted = muted;
+  if (gainNode) {
+    audio.volume = 1;
+    audio.muted = false;
+    gainNode.gain.value = muted ? 0 : volume * volume; // curva más natural al oído
+  } else {
+    audio.volume = volume * volume;
+    audio.muted = muted;
+  }
   els.vol.value = Math.round(volume * 100);
   setRangeFill(els.vol);
 }
@@ -400,6 +703,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "ArrowLeft" && current >= 0) audio.currentTime = Math.max(audio.currentTime - 5, 0);
   else if (e.key.toLowerCase() === "l" && current >= 0) setMode(current);
   else if (e.key.toLowerCase() === "a") els.autoplay.click();
+  else if (e.key.toLowerCase() === "v") setVizMode(vizMode === "bars" ? "wave" : "bars");
 });
 
 // Teclas multimedia del teclado / controles de Windows
@@ -416,3 +720,5 @@ load();
 applyVolume();
 render();
 probeDurations();
+analyzeQueue();
+startSpectrum();
