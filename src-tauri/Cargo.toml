@@ -1,6 +1,6 @@
 [package]
 name = "onda"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reproductor de MP3 minimalista"
 edition = "2021"
 
