@@ -111,36 +111,104 @@ function pearson(a, b) {
   return num / Math.sqrt(da * db || 1);
 }
 
+// Rango de notas analizadas (MIDI 28 = Mi1 … 96 = Do7)
+const LO = 28, HI = 96, NB = HI - LO + 1;
+
+// Diccionario de notas: cada nota con sus armónicos (amplitud 0.8^(h-1))
+const NOTE_DICT = (() => {
+  const W = Array.from({ length: NB }, () => new Float64Array(NB));
+  for (let n = 0; n < NB; n++) {
+    for (let h = 1; h <= 8; h++) {
+      const m = n + Math.round(12 * Math.log2(h));
+      if (m >= NB) break;
+      W[n][m] += Math.pow(0.8, h - 1);
+    }
+  }
+  return W;
+})();
+
+// Separa el espectro en notas fundamentales (mínimos cuadrados no negativos),
+// así los armónicos de una nota no se cuentan como otras notas
+function nnlsNotes(v, iters = 40) {
+  const W = NOTE_DICT;
+  const x = new Float64Array(NB).fill(1e-3);
+  const Wv = new Float64Array(NB), Wx = new Float64Array(NB);
+  for (let n = 0; n < NB; n++) { let s = 0; for (let m = 0; m < NB; m++) s += W[n][m] * v[m]; Wv[n] = s; }
+  for (let it = 0; it < iters; it++) {
+    Wx.fill(0);
+    for (let n = 0; n < NB; n++) if (x[n] > 1e-12) for (let m = 0; m < NB; m++) Wx[m] += W[n][m] * x[n];
+    for (let n = 0; n < NB; n++) {
+      let s = 0;
+      for (let m = 0; m < NB; m++) s += W[n][m] * Wx[m];
+      x[n] *= Wv[n] / (s + 1e-12);
+    }
+  }
+  return x;
+}
+
+// Estima cuántos cents está desafinada la grabación respecto de La 440
+function estimateTuning(x, sr, fft, N, hop) {
+  const hist = new Float64Array(100);
+  const step = hop * 4;
+  for (let off = 0; off + N <= x.length; off += step) {
+    const mag = fft(x, off);
+    for (let k = 2; k < N / 2 - 1; k++) {
+      const f0 = (k * sr) / N;
+      if (f0 < 150 || f0 > 2000) continue;
+      if (!(mag[k] > mag[k - 1] && mag[k] >= mag[k + 1])) continue;
+      const a = Math.log(mag[k - 1] + 1e-12), b = Math.log(mag[k] + 1e-12), c = Math.log(mag[k + 1] + 1e-12);
+      const d = (0.5 * (a - c)) / (a - 2 * b + c || 1);
+      const m = 69 + 12 * Math.log2((((k + d) * sr) / N) / 440);
+      hist[Math.min(99, Math.max(0, Math.floor((m - Math.round(m)) * 100 + 50)))] += mag[k];
+    }
+  }
+  let bi = 0;
+  for (let i = 0; i < 100; i++) if (hist[i] > hist[bi]) bi = i;
+  return bi - 50 + 0.5;
+}
+
 function detectKey(x, sr) {
   const N = 8192, hop = 4096;
   const fft = makeFFT(N);
   const frames = Math.floor((x.length - N) / hop);
   if (frames < 4) return null;
-  // Mapa bin → clase de altura (55 Hz a 2 kHz)
-  const binPc = new Int8Array(N / 2).fill(-1);
+  const tuning = estimateTuning(x, sr, fft, N, hop);
+
+  // Pesos de cada bin hacia su semitono (corrigiendo la afinación)
+  const binNote = new Int16Array(N / 2).fill(-1);
+  const binW = new Float64Array(N / 2);
   for (let k = 1; k < N / 2; k++) {
-    const f = (k * sr) / N;
-    if (f < 55 || f > 2000) continue;
-    const midi = 69 + 12 * Math.log2(f / 440);
-    if (Math.abs(midi - Math.round(midi)) > 0.35) continue; // descartar bins entre notas
-    binPc[k] = ((Math.round(midi) % 12) + 12) % 12;
+    const m = 69 + 12 * Math.log2(((k * sr) / N) / 440) - tuning / 100;
+    const r = Math.round(m);
+    if (r < LO || r > HI) continue;
+    binNote[k] = r - LO;
+    binW[k] = Math.max(0, 1 - Math.abs(m - r) * 2.5);
   }
-  const chroma = new Float64Array(12);
-  const frameChroma = new Float64Array(12);
-  for (let f = 0; f < frames; f++) {
+
+  // Se analiza la canción completa: las piezas suelen modular en la mitad
+  const treble = new Float64Array(12), bass = new Float64Array(12);
+  const spec = new Float64Array(NB);
+  for (let f = 0; f < frames; f += 2) {
     const mag = fft(x, f * hop);
-    frameChroma.fill(0);
-    let total = 0;
-    for (let k = 1; k < N / 2; k++) {
-      const pc = binPc[k];
-      if (pc < 0) continue;
-      const v = mag[k] * mag[k];
-      frameChroma[pc] += v;
-      total += v;
+    spec.fill(0);
+    for (let k = 1; k < N / 2; k++) if (binNote[k] >= 0) spec[binNote[k]] += mag[k] * mag[k] * binW[k];
+    let energy = 0;
+    for (let i = 0; i < NB; i++) { spec[i] = Math.sqrt(spec[i]); energy += spec[i]; }
+    if (energy < 1e-6) continue;
+    const notes = nnlsNotes(spec);
+    const tc = new Float64Array(12), bc = new Float64Array(12);
+    let tt = 0, bt = 0;
+    for (let i = 0; i < NB; i++) {
+      const m = i + LO, a = notes[i];
+      if (m >= 36 && m <= 84) { tc[m % 12] += a; tt += a; }
+      if (m <= 52) { bc[m % 12] += a; bt += a; }
     }
-    if (total <= 1e-9) continue;
-    for (let p = 0; p < 12; p++) chroma[p] += Math.sqrt(frameChroma[p] / total);
+    if (tt > 0) for (let p = 0; p < 12; p++) treble[p] += tc[p] / tt;
+    if (bt > 0) for (let p = 0; p < 12; p++) bass[p] += bc[p] / bt;
   }
+  // El bajo suele marcar la tónica: se suma con medio peso
+  const chroma = treble.map((v, i) => v + 0.5 * bass[i]);
+
   let best = -Infinity, key = null;
   for (let tonic = 0; tonic < 12; tonic++) {
     const rot = Array.from({ length: 12 }, (_, i) => chroma[(i + tonic) % 12]);
@@ -148,14 +216,20 @@ function detectKey(x, sr) {
     if (maj > best) { best = maj; key = { tonic, minor: false }; }
     if (min > best) { best = min; key = { tonic, minor: true }; }
   }
-  if (key) key.confidence = Math.round(best * 100) / 100;
+  if (key) {
+    key.confidence = Math.round(best * 100) / 100;
+    key.tuning = Math.round(tuning);
+  }
   return key;
 }
 
 self.onmessage = (e) => {
   const { id, samples, sampleRate } = e.data;
   try {
-    const bpm = detectBPM(samples, sampleRate);
+    // Para el ritmo basta un minuto del centro de la canción
+    const seg = Math.min(samples.length, 60 * sampleRate);
+    const start = Math.floor((samples.length - seg) * 0.4);
+    const bpm = detectBPM(samples.subarray(start, start + seg), sampleRate);
     const key = detectKey(samples, sampleRate);
     self.postMessage({ id, bpm, key });
   } catch (err) {

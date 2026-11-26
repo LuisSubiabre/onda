@@ -63,7 +63,7 @@ function save() {
   if (!TAURI) return; // en el navegador las URLs de blob no sobreviven a recargar
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      tracks: tracks.map(({ path, mode, duration, bpm, key }) => ({ path, mode, duration, bpm, key })),
+      tracks: tracks.map(({ path, mode, duration, bpm, key, av }) => ({ path, mode, duration, bpm, key, av })),
       current, autoplay, volume, muted,
     }));
   } catch {}
@@ -78,7 +78,7 @@ function load() {
     volume = s.volume ?? 0.8;
     muted = s.muted ?? false;
     tracks = (s.tracks || []).map((t) => Object.assign(makeTrack(t.path, null, t.mode, t.duration), {
-      bpm: t.bpm ?? null, key: t.key ?? null, analyzed: t.bpm !== undefined || t.key !== undefined,
+      bpm: t.bpm ?? null, key: t.key ?? null, av: t.av ?? 0, analyzed: t.av === ANALYSIS_VERSION,
     }));
     current = Math.min(s.current ?? -1, tracks.length - 1);
     if (current >= 0) {
@@ -188,7 +188,7 @@ const keyShort = (k) => `${NOTES_EN[k.tonic]}${k.minor ? "m" : ""}`;
 const keyLong = (k) => `${NOTES[k.tonic]} ${k.minor ? "menor" : "mayor"}`;
 
 const ANALYSIS_RATE = 11025;   // basta para ritmo y notas, y es 4 veces más liviano
-const ANALYSIS_SECONDS = 60;   // se analiza un minuto del centro de la canción
+const ANALYSIS_VERSION = 2;    // subirlo hace que se vuelvan a analizar las pistas guardadas
 let worker = null;
 let analyzing = null;          // pista en análisis
 const workerJobs = new Map();
@@ -207,13 +207,12 @@ function getWorker() {
 async function analyzeTrack(t) {
   const data = await (await fetch(t.url)).arrayBuffer();
   const decoded = await new OfflineAudioContext(1, 1, 44100).decodeAudioData(data);
-  const len = Math.min(ANALYSIS_SECONDS, decoded.duration);
-  const offset = Math.max(0, (decoded.duration - len) * 0.4);
-  const off = new OfflineAudioContext(1, Math.ceil(len * ANALYSIS_RATE), ANALYSIS_RATE);
+  // Canción completa en mono a 11 kHz (el worker toma lo que necesita)
+  const off = new OfflineAudioContext(1, Math.ceil(decoded.duration * ANALYSIS_RATE), ANALYSIS_RATE);
   const src = off.createBufferSource();
   src.buffer = decoded;
   src.connect(off.destination);
-  src.start(0, offset, len);
+  src.start();
   const rendered = await off.startRendering();
   const samples = rendered.getChannelData(0).slice();
   return new Promise((resolve) => {
@@ -240,6 +239,7 @@ async function analyzeQueue() {
       console.warn("No se pudo analizar", t.path, err);
     }
     t.analyzed = true;
+    t.av = ANALYSIS_VERSION;
     analyzing = null;
     if (tracks.includes(t)) {
       updateRow(t);
