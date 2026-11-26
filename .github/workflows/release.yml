@@ -1,0 +1,83 @@
+# Compila Onda para Windows y macOS y adjunta los instaladores al release de GitHub.
+#
+# - Automático: al subir una etiqueta de versión (git tag v0.3.0 && git push --tags).
+# - Manual: pestaña Actions → "Release" → Run workflow, indicando una etiqueta existente.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Etiqueta a compilar (por ejemplo v0.2.0)"
+        required: true
+      platform:
+        description: "Plataformas a compilar"
+        type: choice
+        options: [todas, macos, windows]
+        default: todas
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            os: macos-latest
+            args: --target universal-apple-darwin
+          - name: windows
+            os: windows-latest
+            args: ""
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+
+    steps:
+      - name: Omitir si no corresponde
+        id: gate
+        shell: bash
+        run: |
+          p="${{ github.event.inputs.platform || 'todas' }}"
+          if [ "$p" = "todas" ] || [ "$p" = "${{ matrix.name }}" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; else echo "run=false" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.run == 'true'
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.gate.outputs.run == 'true'
+        with:
+          # en Mac se compila para chip Apple e Intel a la vez (binario universal)
+          targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        if: steps.gate.outputs.run == 'true'
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Instalar dependencias
+        if: steps.gate.outputs.run == 'true'
+        run: npm ci
+
+      - name: Compilar y subir al release
+        if: steps.gate.outputs.run == 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "Onda __VERSION__"
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

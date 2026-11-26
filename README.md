@@ -11,6 +11,13 @@ Reproductor de MP3 de escritorio, minimalista, hecho con [Tauri 2](https://tauri
 - Análisis automático de **BPM** y **tonalidad** (notación latina y Camelot).
 - Tema claro u oscuro según Windows; la lista y las preferencias se guardan al cerrar.
 
+## Instalación
+
+Descarga el instalador desde la [última versión](https://github.com/LuisSubiabre/onda/releases/latest):
+
+- **Windows 10/11:** `Onda_x.y.z_x64-setup.exe`. Si SmartScreen avisa, elige *Más información → Ejecutar de todas formas*.
+- **macOS (chip Apple o Intel):** `Onda_x.y.z_universal.dmg`. Arrastra Onda a Aplicaciones. Como la app no está firmada, la primera vez ábrela con clic derecho → *Abrir* → *Abrir*.
+
 ## Atajos de teclado
 
 | Tecla | Acción |
@@ -33,5 +40,7 @@ npm install
 npm run dev     # abre la app en modo desarrollo
 npm run build   # genera el instalador en src-tauri/target/release/bundle/
 ```
+
+Al subir una etiqueta de versión (`git tag v0.3.0 && git push --tags`), GitHub Actions compila los instaladores de Windows y macOS y los adjunta al release.
 
 La interfaz está en `src/` (HTML, CSS y JavaScript sin dependencias) y el análisis de audio corre en un Web Worker (`src/analyzer.js`).
